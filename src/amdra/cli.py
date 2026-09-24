@@ -52,9 +52,8 @@ def report(state: dict) -> dict:
 
 
 def cmd_run(args) -> None:
-    from langgraph.checkpoint.memory import MemorySaver
-
     from amdra.data.generate import load_cases
+    from amdra.graph.build import memory_checkpointer, sqlite_checkpointer
 
     s = _settings(args.offline)
     case = next((c for c in load_cases(s.cases_path) if c.dispute.dispute_id == args.dispute_id), None)
@@ -64,12 +63,10 @@ def cmd_run(args) -> None:
     if args.checkpoint_db:
         # Persistent (M3b): survives a process restart mid human-review pause. Not the default —
         # tests and eval runs keep MemorySaver so they stay fast and side-effect-free.
-        from langgraph.checkpoint.sqlite import SqliteSaver
-
-        with SqliteSaver.from_conn_string(args.checkpoint_db) as checkpointer:
+        with sqlite_checkpointer(args.checkpoint_db) as checkpointer:
             _run_case(s, case, checkpointer, args)
     else:
-        _run_case(s, case, MemorySaver(), args)
+        _run_case(s, case, memory_checkpointer(), args)
 
 
 def _run_case(s: Settings, case, checkpointer, args) -> None:

@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.5"]
+ui = ["streamlit>=1.30"]
 
 [project.scripts]
 amdra = "amdra.cli:main"

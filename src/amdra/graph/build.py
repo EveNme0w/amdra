@@ -34,6 +34,62 @@ from amdra.schemas import Dispute
 from amdra.tools.toolbox import Toolbox
 
 
+def _checkpoint_serde():
+    """A JsonPlusSerializer that explicitly allows AMDRA's own Pydantic/Enum types during
+    checkpoint deserialization. Without this, resuming a paused run (`interrupt_for_review`,
+    exercised by `cmd_run --review` and the M5 UI) logs "Deserializing unregistered type ...
+    will be blocked in a future version" for every one of them — harmless today, a hard failure
+    once langgraph defaults LANGGRAPH_STRICT_MSGPACK to true. Explicit and enumerated, not a
+    blanket bypass (`allowed_msgpack_modules=True`), consistent with this project's
+    least-privilege posture elsewhere (NODE_SCOPES, @authorized)."""
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    from amdra.schemas import (
+        Account,
+        AuditEvent,
+        Citation,
+        ClassifierResult,
+        Evidence,
+        LabeledCase,
+        Outcome,
+        ReasonCode,
+        Receipt,
+        Recommendation,
+        Transaction,
+        VisionResult,
+    )
+
+    return JsonPlusSerializer(allowed_msgpack_modules=[
+        Account, AuditEvent, Citation, ClassifierResult, Dispute, Evidence, LabeledCase,
+        Outcome, ReasonCode, Receipt, Recommendation, Transaction, VisionResult,
+    ])
+
+
+def memory_checkpointer():
+    """MemorySaver configured to deserialize AMDRA's own state types without warnings — use this
+    instead of a bare MemorySaver() wherever a paused (interrupt_for_review) run may be resumed."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    return MemorySaver(serde=_checkpoint_serde())
+
+
+def sqlite_checkpointer(conn_string: str):
+    """SqliteSaver configured the same way — a drop-in replacement for
+    `SqliteSaver.from_conn_string(conn_string)` (M3b) with AMDRA's types allowlisted. Still a
+    context manager, same usage: `with sqlite_checkpointer(path) as checkpointer: ...`."""
+    import sqlite3
+    from contextlib import closing, contextmanager
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    @contextmanager
+    def _open():
+        with closing(sqlite3.connect(conn_string, check_same_thread=False)) as conn:
+            yield SqliteSaver(conn, serde=_checkpoint_serde())
+
+    return _open()
+
+
 def build_graph(nodes: Nodes, checkpointer: Any = None, interrupt_for_review: bool = False):
     react = nodes.settings.investigator == "react"
     g = StateGraph(DisputeState)

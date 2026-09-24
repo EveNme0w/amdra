@@ -200,9 +200,9 @@ def test_offline_mode_never_uses_routing_reasoner(settings):
 
 
 def test_human_approval_issues_credit(settings, cases):
-    from langgraph.checkpoint.memory import MemorySaver
+    from amdra.graph.build import memory_checkpointer
 
-    agent = Agent.create(settings, checkpointer=MemorySaver(), interrupt_for_review=True)
+    agent = Agent.create(settings, checkpointer=memory_checkpointer(), interrupt_for_review=True)
     case = next(c for c in cases if c.scenario == "amount_lower_receipt")
     config = {"configurable": {"thread_id": case.dispute.dispute_id}}
     agent.graph.invoke({"dispute": case.dispute}, config=config)
@@ -218,19 +218,19 @@ def test_human_approval_issues_credit(settings, cases):
 def test_sqlite_checkpointer_resumes_after_restart(settings, cases, tmp_path):
     """M3b: unlike MemorySaver, a pause must survive the process (here: the Agent/checkpointer
     instance) being torn down and rebuilt from the same file — proves the actual value-add."""
-    from langgraph.checkpoint.sqlite import SqliteSaver
+    from amdra.graph.build import sqlite_checkpointer
 
     case = next(c for c in cases if c.scenario == "amount_lower_receipt")
     config = {"configurable": {"thread_id": case.dispute.dispute_id}}
     db_path = str(tmp_path / "checkpoints.sqlite")
 
-    with SqliteSaver.from_conn_string(db_path) as checkpointer:
+    with sqlite_checkpointer(db_path) as checkpointer:
         agent = Agent.create(settings, checkpointer=checkpointer, interrupt_for_review=True)
         agent.graph.invoke({"dispute": case.dispute}, config=config)
         assert agent.graph.get_state(config).next == ("human_review",)
     # checkpointer/connection closed here — simulates a process restart
 
-    with SqliteSaver.from_conn_string(db_path) as checkpointer:
+    with sqlite_checkpointer(db_path) as checkpointer:
         agent = Agent.create(settings, checkpointer=checkpointer, interrupt_for_review=True)
         assert agent.graph.get_state(config).next == ("human_review",)  # resumed from disk
         agent.graph.update_state(config, {"human_decision": {"approved": True, "reviewer": "qa"}})

@@ -9,10 +9,12 @@ source .venv/bin/activate          # Python >= 3.10; install: pip install -e ".[
 amdra generate                     # rebuild data/synthetic (deterministic, seed 7)
 pytest -q                          # offline: in-memory store, hashing embedder, no API key
 amdra eval --offline               # rule-based baseline; must stay at 100% on every metric
-amdra eval --limit 14              # Claude, one case per scenario (~$0.35)
-amdra eval --tag injection         # or --scenario <name> (repeatable)
-amdra eval                         # all 42 cases with Claude (~$1)
-amdra run D00012 [--review] [--offline]
+amdra eval --limit 14              # Claude, one case per scenario (~$0.20)
+amdra eval --tag injection         # or --scenario/--tag injection_adversarial/ocr_noise (repeatable)
+amdra eval                         # all 66 cases with Claude (~$1)
+amdra eval --hybrid / --react / --haiku-routing   # opt-in ablations, see DESIGN.md M2b/M3c/M4d
+amdra run D00012 [--review [--checkpoint-db PATH]] [--offline]
+pip install -e ".[ui]" && streamlit run src/amdra/ui/app.py   # M5 reviewer UI + eval dashboard
 ```
 
 Evals that call Claude cost money. Ask before running a full eval or more than about 15 cases, and prefer `--offline`, `--tag` or `--scenario` while iterating. Results are written to `evals/results/<timestamp>.{json,md}`; compare new results against the previous run.
@@ -25,8 +27,9 @@ Evals that call Claude cost money. Ask before running a full eval or more than a
 - `tools/authz.py` defines the `@authorized` decorator and the scopes. `tools/toolbox.py` holds the SQLite banking tools, OCR, policy search, and credit.
 - `guardrails.py` holds the injection scanner and the untrusted-content spotlighting.
 - `llm.py` holds `ClaudeReasoner` (structured output) and `OfflineReasoner` (the baseline and oracle).
-- `graph/` holds the state (reducers), the nodes, and `build.py` (the wiring and the `Agent` wrapper).
+- `graph/` holds the state (reducers), the nodes, and `build.py` (the wiring, the `Agent` wrapper, and the checkpointer helpers).
 - `evals/runner.py` holds the metrics, sampling and reports. `evals/authz_probes.py` holds the red-team tool probes.
+- `ui/` holds the optional Streamlit reviewer UI + eval dashboard (M5, `pip install -e ".[ui]"`).
 
 ## Invariants (don't break these without updating DESIGN.md and the tests)
 
@@ -36,7 +39,7 @@ Evals that call Claude cost money. Ask before running a full eval or more than a
    - Nodes get scopes only through `NODE_SCOPES`.
    - `decide` and `verify` have no scopes.
    - `credit:write` belongs only to `human_review`, which acts only when `human_decision.approved` is set.
-3. **The graph calls tools, not the LLM.** If you add model-driven tool calling (milestone M3), route it through the same authz wrapper and add probes.
+3. **The graph calls tools, not the LLM.** The `"react"` investigator (M3c, opt-in via `Settings.investigator`) is the one exception, and even there the model only picks *which* tool to call from a bounded roster the graph hands it — never *whether* to call one, and every tool routes through the same authz wrapper. If you add another model-driven tool-calling path, follow that pattern and add probes to `evals/authz_probes.py`.
 4. **Untrusted text** (receipts, narratives) is `Evidence(trusted=False)` and is rendered through `guardrails.render_evidence`. Never splice it into a system prompt.
 5. **Citations are verified verbatim** in `verify`. Approvals, escalations, low confidence and injection flags always go to human review.
 6. **Observability is append-only.** Nodes return `audit`, `tool_calls` and `llm_usage` through the `@node` wrapper; don't bypass it.
@@ -53,14 +56,14 @@ Evals that call Claude cost money. Ask before running a full eval or more than a
 
 ## Current state (Sept 2026)
 
-- **M1 skeleton is complete.** 18 offline tests pass.
-- **First Claude run** (`claude-sonnet-4-5`, 10 fraud and duplicate cases) was 100% accurate with 100% citation validity. p50 latency was about 12 s, and cost about $0.023 per case, with about 870 output tokens per case.
-- **Pricing check needed:** the rates in `config.PRICING_PER_MTOK` are assumptions and need to be verified.
+**All five milestones (M1–M5) in `docs/DESIGN.md` §10 are done.** 33 offline tests pass; `amdra eval --offline` scores 1.000 on every core metric across the full 66-case suite; pricing in `config.PRICING_PER_MTOK` has been verified against live rates. Highlights worth knowing before touching related code:
 
-Suggested next steps:
+- **M2b (hybrid retrieval)** found no measurable lift on this corpus — a structural finding (sibling-section ambiguity only case facts can resolve), not an implementation gap. See DESIGN.md §5.
+- **M3c (`"react"` investigator)** is a real ablation, not the default — `Settings.investigator` stays `"fixed"` unless explicitly opted in.
+- **M4b/M4c (adversarial injection + classifier)** found the regex scanner alone catches 0% of even moderately-obfuscated attempts; the M4c classifier closes most but not all of that gap — the remaining miss traces to OCR never extracting certain text at all when `tesseract` isn't installed, not a detector failure. See DESIGN.md §8.
+- **M4d (Haiku routing)** is implemented and verified correct, but the live measurement showed a net cost/latency *loss* on this domain as currently tuned — stays opt-in for exactly that reason. Don't assume it's a win without re-measuring.
+- **A pre-existing checkpointer bug** (unregistered-type deserialization warnings, silently swallowed by pytest's default log capture) was found and fixed while building M5 — `graph/build.py`'s `memory_checkpointer()`/`sqlite_checkpointer()` replace bare `MemorySaver()`/`SqliteSaver.from_conn_string()` everywhere. Use those, not the raw constructors, for any new checkpointer usage.
 
-1. Run the full Claude eval and record a baseline.
-2. Cut latency and cost with a shorter rationale, token caps, or Haiku routing.
-3. M2: noisy receipts (blur, rotation), OCR confidence, and a vision fallback.
-4. Harder and adversarial cases: conflicting evidence, and injections that dodge the regex scanner.
-5. An ablation comparing raw records with computed facts in the prompt.
+Everything above was measured live, not assumed — re-verify before citing a number from here if meaningfully more code has changed since.
+
+Open design questions (not yet resolved, see DESIGN.md §11): whether `escalate` should count as correct against an expected `deny` when evidence is ambiguous; whether the model should see computed facts, raw records, or both; whether react-mode's `OfflineReasoner` combination needs hardening for every reason code.

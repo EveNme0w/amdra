@@ -14,10 +14,14 @@ cp .env.example .env                # add ANTHROPIC_API_KEY
 
 amdra generate                      # data/synthetic: bank.db, receipts/*.png, policies/*.md, cases.jsonl
 amdra eval --offline                # rule-based baseline, no API key (should be 100%)
-amdra eval --limit 14               # Claude on one case per scenario (~$0.35)
-amdra eval --tag injection          # just the prompt-injection cases
+amdra eval --limit 14               # Claude on one case per scenario (~$0.20)
+amdra eval --tag injection          # or --tag injection_adversarial / ocr_noise
+amdra eval --hybrid / --react / --haiku-routing   # opt-in ablations, see docs/DESIGN.md
 amdra run D00012 --review           # one case, pausing at the human-review gate
 pytest
+
+uv pip install -e ".[ui]"           # optional: reviewer UI + eval dashboard
+streamlit run src/amdra/ui/app.py
 ```
 
 ## Layout
@@ -33,11 +37,12 @@ src/amdra/
   tools/toolbox.py      SQLite banking tools, OCR, policy search, provisional credit
   guardrails.py         injection scanner + untrusted-content spotlighting
   llm.py                ClaudeReasoner (structured output) and OfflineReasoner baseline
-  graph/                LangGraph state, nodes, and wiring (verify/retry, HITL interrupt)
+  graph/                LangGraph state, nodes, wiring (verify/retry, HITL interrupt), checkpointers
   evals/                eval runner + tool-authorization red-team probes
+  ui/                   optional Streamlit reviewer UI + eval dashboard (pip install -e ".[ui]")
 tests/                  pytest suite (offline, in-memory, no API key)
 ```
 
 ## Status
 
-v0.1 skeleton. The core logic and test suite were verified offline with a minimal LangGraph stand-in, because PyPI was unreachable in the build environment. Run `pytest` after installing to confirm against the real `langgraph` and `chromadb` packages.
+All five milestones in [docs/DESIGN.md](docs/DESIGN.md) §10 are complete: the deterministic graph with an offline rule-based baseline (M1); hybrid retrieval, noisy-receipt OCR confidence, and a vision-model fallback (M2); LangSmith tracing, a persistent checkpointer, and an opt-in ReAct investigator ablation (M3); an adversarial injection suite, an LLM classifier second opinion, and cost/latency budgets with opt-in Haiku routing (M4); and a Streamlit reviewer UI + eval dashboard (M5). 33 offline tests pass; `amdra eval --offline` scores 100% on every core metric across the full 66-case suite. See `docs/DESIGN.md` for the live-measured findings behind each milestone (several surprising, documented rather than smoothed over) and the open questions still on the table.
