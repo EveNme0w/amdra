@@ -29,6 +29,11 @@ Rules:
 - Check the filing window first. An untimely dispute is denied under the filing-window policy.
 - outcome must be one of: approve, deny, escalate. Escalate when policy requires it or when the
   evidence is insufficient or contradictory.
+- A computed fact that says a value is "unknown" (e.g. an unreadable receipt total, an unknown
+  expected-delivery date) means that value could not be determined — not that it was zero, and
+  not that it matched or fell short of anything. Never treat "unknown" as evidence for approving
+  or denying; a policy condition that depends on an unknown value cannot be verified as met OR
+  unmet, so escalate instead of guessing which way it would have gone.
 - policy_section is the single governing section, formatted like "POL-003 §3.1". Multiple
   retrieved sections can share a reason code (for example one section's condition triggers
   approval, another's triggers denial for the same reason code). Cite the section whose OWN

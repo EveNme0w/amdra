@@ -142,11 +142,19 @@ class Builder:
                                       expected_policy_section=section, tags=list(tags)))
 
 
-# Pixel-level noise is a best-effort extra layer for the real (tesseract) OCR path — it has no
-# effect on the deterministic sidecar-text path that `pytest`/`--offline` exercise (see
-# tools/toolbox.py `_corrupt_text`, which is what actually drives offline confidence/degradation).
+# Pixel-level noise matters on TWO real paths: real tesseract OCR, and vision_fallback (M2d),
+# which reads this image directly — it has no effect on the deterministic sidecar-text path that
+# `pytest`/`--offline` exercise (see tools/toolbox.py `_corrupt_text`, which drives offline
+# confidence/degradation instead). Blur+rotation alone turned out NOT to be enough to defeat a
+# real vision model (Claude read a "severe" blurred/rotated receipt at 0.98 confidence in a live
+# eval) — vision is far more robust to blur than regex-based OCR. Redacting only the TOTAL line
+# wasn't enough either: the generator always splits the total into item lines that sum exactly to
+# it (see Builder.receipt), and Claude simply added up the still-visible items instead of reading
+# the blacked-out total. So "severe" redacts every dollar-amount line (items and total alike) and
+# the expected-delivery line with a solid black bar before blurring — nothing money-shaped is
+# left to read or reconstruct from, the same guarantee `_corrupt_text` gives the sidecar path.
 PIXEL_NOISE = {"clean": None, "mild": {"blur": 0.8, "rotate": 1.5},
-               "severe": {"blur": 2.2, "rotate": 4.0}}
+               "severe": {"blur": 2.2, "rotate": 4.0, "redact": True}}
 
 
 def render_receipt(lines: list[str], path: Path, noise: str = "clean") -> None:
@@ -159,6 +167,11 @@ def render_receipt(lines: list[str], path: Path, noise: str = "clean") -> None:
         draw.text((40, 30 + i * line_h), line, fill=0, font=font)
     params = PIXEL_NOISE.get(noise)
     if params:
+        if params.get("redact"):
+            for i, line in enumerate(lines):
+                if "$" in line or "Expected delivery" in line:
+                    y0 = 30 + i * line_h
+                    draw.rectangle([35, y0 - 4, width - 35, y0 + 32], fill=0)
         img = img.filter(ImageFilter.GaussianBlur(params["blur"]))
         img = img.rotate(params["rotate"], expand=True, fillcolor=255)
     path.parent.mkdir(parents=True, exist_ok=True)
