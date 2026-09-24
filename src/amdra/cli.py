@@ -6,6 +6,7 @@
     amdra run D00012 --review --checkpoint-db out.sqlite  # persist the pause across a restart
     amdra eval --limit 14          # one case per scenario (see --scenario, --tag)
     amdra eval --limit 14 --react  # same cases, via the M3c ReAct investigator instead
+    amdra eval --limit 14 --haiku-routing --cost-budget 0.02  # M4d: cheap-first + budget report
 Add --offline to any command to use the rule-based reasoner and hashing embedder.
 """
 from __future__ import annotations
@@ -16,7 +17,9 @@ import json
 from amdra.config import Settings
 
 
-def _settings(offline: bool, hybrid: bool = False, react: bool = False) -> Settings:
+def _settings(offline: bool, hybrid: bool = False, react: bool = False,
+              haiku_routing: bool = False, cost_budget: float | None = None,
+              latency_budget: float | None = None) -> Settings:
     s = Settings()
     if offline:
         s.llm, s.embedder = "offline", "hashing"
@@ -24,6 +27,10 @@ def _settings(offline: bool, hybrid: bool = False, react: bool = False) -> Setti
         s.hybrid_retrieval = True
     if react:
         s.investigator = "react"
+    if haiku_routing:
+        s.haiku_routing = True
+    s.cost_budget_usd = cost_budget
+    s.latency_budget_s = latency_budget
     return s
 
 
@@ -112,7 +119,8 @@ def main() -> None:
     elif args.cmd == "run":
         cmd_run(args)
     elif args.cmd == "eval":
-        s = _settings(args.offline, args.hybrid, args.react)
+        s = _settings(args.offline, args.hybrid, args.react, args.haiku_routing,
+                     args.cost_budget, args.latency_budget)
         if args.retrieval_only:
             from amdra.data.generate import load_cases
             from amdra.evals.runner import evaluate_retrieval, select_cases

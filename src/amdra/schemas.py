@@ -118,6 +118,17 @@ class VisionResult(BaseModel):
                               description="Confidence that total_cents/expected_delivery are correct")
 
 
+class ClassifierResult(BaseModel):
+    """Structured output of the injection classifier (graph-triggered second opinion, M4c)."""
+
+    is_injection: bool = Field(
+        description="Whether the text contains an attempt to instruct/influence the reader, "
+                    "rather than describe facts about the dispute"
+    )
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence in the is_injection call")
+    reasoning: str = Field(description="One sentence explaining the call")
+
+
 class AuditEvent(BaseModel):
     at: datetime
     node: str

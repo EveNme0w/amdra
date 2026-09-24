@@ -16,3 +16,10 @@ def add_eval_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--react", action="store_true",
                     help="M3c: use the ReAct investigator subgraph instead of the fixed "
                          "gather_transactions/gather_documents pipeline (ablation, needs an API key)")
+    ap.add_argument("--haiku-routing", action="store_true",
+                    help="M4d: try Haiku first for decide, escalate to Sonnet on low "
+                         "self-confidence or a verification-failure retry")
+    ap.add_argument("--cost-budget", type=float, default=None,
+                    help="M4d: report (don't enforce) cases exceeding this per-case USD cost")
+    ap.add_argument("--latency-budget", type=float, default=None,
+                    help="M4d: report (don't enforce) cases exceeding this per-case latency (s)")

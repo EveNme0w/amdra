@@ -11,13 +11,16 @@ def test_limit_samples_across_scenarios_tagged_first(cases):
 
 
 def test_limit_equal_to_scenario_count_covers_all(cases):
-    picked = select_cases(cases, limit=14)
-    assert len({c.scenario for c in picked}) == 14
+    n_scenarios = len({c.scenario for c in cases})
+    picked = select_cases(cases, limit=n_scenarios)
+    assert len({c.scenario for c in picked}) == n_scenarios
 
 
 def test_filters(cases):
     assert {c.scenario for c in select_cases(cases, tags=["injection"])} == {
-        "injection_receipt", "injection_narrative"}
+        "injection_receipt", "injection_narrative", "injection_narrative_obfuscated",
+        "injection_narrative_homoglyph", "injection_narrative_multilingual",
+        "injection_receipt_image_only"}
     only = select_cases(cases, scenarios=["amount_matches"])
     assert len(only) == 3 and {c.scenario for c in only} == {"amount_matches"}
     with pytest.raises(ValueError):

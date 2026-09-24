@@ -42,6 +42,25 @@ class Settings:
     # only, never the default, so tests and --offline stay on the deterministic, zero-cost path.
     investigator: str = field(default_factory=lambda: os.getenv("AMDRA_INVESTIGATOR", "fixed"))
     investigator_max_steps: int = 8
+    # M4c: the injection classifier runs unconditionally on every case, so a cheaper model is the
+    # right default — classification doesn't need Sonnet-level reasoning the way decide does.
+    classifier_model: str = field(
+        default_factory=lambda: os.getenv("AMDRA_CLASSIFIER_MODEL", "claude-haiku-4-5")
+    )
+    # M4d: opt-in two-tier cost routing for `decide` — try `classifier_model` (Haiku) first;
+    # escalate to `model` (Sonnet) immediately if its own confidence is below the threshold, or
+    # on any retry after a verification failure. Never the default, same as hybrid_retrieval/
+    # investigator — a comparable, not a replacement.
+    haiku_routing: bool = field(
+        default_factory=lambda: os.getenv("AMDRA_HAIKU_ROUTING", "").lower() in ("1", "true", "yes")
+    )
+    # Stricter than confidence_threshold (0.7, used for human-review gating) — this is a "is this
+    # really simple enough for the cheap model" self-check, not a review trigger.
+    haiku_routing_confidence_threshold: float = 0.85
+    # M4d: reporting only, not enforced — an eval summary field (over_budget_cases) flags cases
+    # exceeding either, so real budgets can be set from evidence instead of guessed. None = off.
+    cost_budget_usd: float | None = None
+    latency_budget_s: float | None = None
     data_dir: Path = field(
         default_factory=lambda: Path(os.getenv("AMDRA_DATA_DIR", REPO_ROOT / "data" / "synthetic"))
     )

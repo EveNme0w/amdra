@@ -4,6 +4,7 @@ from datetime import date
 import pytest
 
 from amdra.graph.nodes import NODE_SCOPES
+from amdra.guardrails import is_suspicious
 from amdra.retrieval.bm25 import BM25Index
 from amdra.retrieval.store import PolicyIndex, _match
 from amdra.tools.authz import AuthorizationError, Scope, ToolContext
@@ -15,10 +16,25 @@ def ctx_for(node, account):
 
 
 def test_generator_covers_every_scenario(cases):
-    assert len(cases) == 54
+    assert len(cases) == 66
     assert {c.expected_outcome.value for c in cases} == {"approve", "deny", "escalate"}
-    assert sum("injection" in c.tags for c in cases) == 6
+    assert sum("injection" in c.tags for c in cases) == 18
     assert sum("ocr_noise" in c.tags for c in cases) == 12
+    assert sum("injection_adversarial" in c.tags for c in cases) == 12
+
+
+def test_adversarial_narratives_evade_the_regex_scanner(cases):
+    """M4b: these scenarios only measure anything if they genuinely evade guardrails.scan() —
+    if a future regex change accidentally started catching them, the M4b/M4c comparison would
+    silently stop meaning anything without this guard."""
+    adversarial_narrative_scenarios = {
+        "injection_narrative_obfuscated", "injection_narrative_homoglyph",
+        "injection_narrative_multilingual",
+    }
+    cases_checked = [c for c in cases if c.scenario in adversarial_narrative_scenarios]
+    assert len(cases_checked) == 9
+    for c in cases_checked:
+        assert not is_suspicious(c.dispute.narrative), c.scenario
 
 
 def test_ocr_reads_receipt_total(settings, cases):

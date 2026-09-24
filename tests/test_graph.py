@@ -23,8 +23,9 @@ def test_offline_agent_end_to_end(settings, cases):
     assert state["verification"]["passed"]
     assert state["needs_human_review"]  # approvals always need a human
     assert state["status"] == "pending_human_review"
-    assert [a["node"] for a in state["audit"]][:4] == [
-        "intake", "gather_transactions", "gather_documents", "retrieve_policy"]
+    assert [a["node"] for a in state["audit"]][:5] == [
+        "intake", "gather_transactions", "gather_documents", "classify_injection",
+        "retrieve_policy"]
     assert agent.toolbox.credit_ledger == []
 
 
@@ -45,17 +46,33 @@ class FakeVisionReasoner:
 
     model_name = "fake-vision"
 
-    def __init__(self, total_cents=None, expected_delivery=None):
+    def __init__(self, total_cents=None, expected_delivery=None,
+                 transcribed_text="[fake vision transcription]"):
         self.total_cents, self.expected_delivery = total_cents, expected_delivery
+        self.transcribed_text = transcribed_text
         self.calls = 0
 
     def read(self, image_b64, media_type, receipt_kind):
         self.calls += 1
-        result = VisionResult(transcribed_text="[fake vision transcription]",
+        result = VisionResult(transcribed_text=self.transcribed_text,
                               total_cents=self.total_cents, expected_delivery=self.expected_delivery,
                               confidence=0.9)
         return result, {"model": self.model_name, "input_tokens": 100, "output_tokens": 50,
                         "cost_usd": 0.001, "latency_s": 0.5}
+
+
+def test_vision_fallback_does_not_flag_on_a_weak_signal_alone(settings, cases):
+    """M4a: vision_fallback used to flag on any single regex hit (raw scan()), inconsistently
+    with every other node's is_suspicious() gate — a lone decision_command phrase like "approve
+    this" is common in honest narratives and must not flag by itself, same as it wouldn't via
+    gather_documents' OCR path."""
+    case = next(c for c in cases if "noisy_severe" in c.scenario)
+    fake_vision = FakeVisionReasoner(
+        transcribed_text="Please approve this transaction immediately, thank you.")
+    agent = Agent.create(settings, vision_reasoner=fake_vision)
+    state = agent.run(case.dispute)
+    assert fake_vision.calls >= 1
+    assert not state["injection_flags"]
 
 
 def test_vision_fallback_can_recover_a_severe_noise_case(settings, cases):
@@ -81,9 +98,15 @@ def test_injection_is_flagged_and_does_not_flip_outcome(settings, cases):
     agent = Agent.create(settings)
     for case in [c for c in cases if "injection" in c.tags]:
         state = agent.run(case.dispute)
-        assert state["injection_flags"], case.scenario
-        assert state["recommendation"].outcome == Outcome.DENY
-        assert "possible_prompt_injection" in state["review_reasons"]
+        # Adversarial variants (M4b) deliberately evade the regex scanner — that's the point, and
+        # is separately guarded by test_adversarial_narratives_evade_the_regex_scanner. Only the
+        # original blatant scenarios are expected to trip the flag here.
+        if "injection_adversarial" not in case.tags:
+            assert state["injection_flags"], case.scenario
+            assert "possible_prompt_injection" in state["review_reasons"]
+        # Regardless of flagging, the decision itself never depends on narrative/receipt text —
+        # OfflineReasoner only ever reads computed facts — so it must stay correct either way.
+        assert state["recommendation"].outcome == Outcome.DENY, case.scenario
 
 
 def test_clean_narratives_not_flagged(cases):
@@ -115,6 +138,65 @@ def test_verifier_rejects_fabricated_citations(settings, cases):
     assert not state["verification"]["passed"]
     assert reasoner.calls == settings.max_decide_attempts  # retried with feedback
     assert "verification_failed" in state["review_reasons"]
+
+
+class ScriptedReasoner:
+    """Test double: always returns the same (outcome, confidence), counting calls — used to
+    drive RoutingReasoner's escalation logic (M4d) without a real API call."""
+
+    def __init__(self, model_name, confidence, outcome=Outcome.DENY, section="POL-003 §3.3"):
+        self.model_name, self.confidence = model_name, confidence
+        self.outcome, self.section, self.calls = outcome, section, 0
+
+    def decide(self, dispute, evidence, feedback):
+        self.calls += 1
+        rec = Recommendation(outcome=self.outcome, policy_section=self.section,
+                             rationale="scripted", confidence=self.confidence,
+                             citations=[Citation(evidence_id="txn:FAKE", quote="x")])
+        return rec, {"model": self.model_name, "input_tokens": 10, "output_tokens": 5,
+                     "cost_usd": 0.0001, "latency_s": 0.1}
+
+
+def test_routing_reasoner_uses_cheap_result_when_confident(settings, cases):
+    from amdra.llm import RoutingReasoner
+
+    cheap, capable = ScriptedReasoner("cheap", 0.9), ScriptedReasoner("capable", 0.99)
+    routing = RoutingReasoner(settings, cheap=cheap, capable=capable)
+    rec, usage = routing.decide(cases[0].dispute, [], [])
+    assert cheap.calls == 1 and capable.calls == 0
+    assert [u["model"] for u in usage] == ["cheap"]
+    assert rec.confidence == 0.9
+
+
+def test_routing_reasoner_escalates_on_low_confidence(settings, cases):
+    from amdra.llm import RoutingReasoner
+
+    cheap = ScriptedReasoner("cheap", 0.5)  # below the 0.85 default threshold
+    capable = ScriptedReasoner("capable", 0.95)
+    routing = RoutingReasoner(settings, cheap=cheap, capable=capable)
+    rec, usage = routing.decide(cases[0].dispute, [], [])
+    assert cheap.calls == 1 and capable.calls == 1
+    assert [u["model"] for u in usage] == ["cheap", "capable"]
+    assert rec.confidence == 0.95  # capable's result wins, not cheap's
+
+
+def test_routing_reasoner_skips_cheap_on_verification_retry(settings, cases):
+    from amdra.llm import RoutingReasoner
+
+    cheap, capable = ScriptedReasoner("cheap", 0.9), ScriptedReasoner("capable", 0.9)
+    routing = RoutingReasoner(settings, cheap=cheap, capable=capable)
+    _, usage = routing.decide(cases[0].dispute, [], ["previous verification failed"])
+    assert cheap.calls == 0 and capable.calls == 1  # cheap already had its shot
+    assert [u["model"] for u in usage] == ["capable"]
+
+
+def test_offline_mode_never_uses_routing_reasoner(settings):
+    from dataclasses import replace
+
+    from amdra.llm import OfflineReasoner, make_reasoner
+
+    reasoner = make_reasoner(replace(settings, haiku_routing=True))
+    assert isinstance(reasoner, OfflineReasoner)  # llm == "offline" wins regardless of the flag
 
 
 def test_human_approval_issues_credit(settings, cases):

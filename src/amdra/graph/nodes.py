@@ -18,7 +18,13 @@ from datetime import date, datetime, timezone
 from amdra.config import Settings
 from amdra.graph.state import DisputeState
 from amdra.guardrails import is_suspicious, scan
-from amdra.llm import Reasoner, VisionReasoner, make_vision_reasoner
+from amdra.llm import (
+    InjectionClassifier,
+    Reasoner,
+    VisionReasoner,
+    make_injection_classifier,
+    make_vision_reasoner,
+)
 from amdra.schemas import Account, Dispute, Evidence, Outcome, ReasonCode, Transaction
 from amdra.tools.authz import AuthorizationError, Scope, ToolContext
 from amdra.tools.toolbox import Toolbox
@@ -32,6 +38,8 @@ NODE_SCOPES: dict[str, frozenset[str]] = {
     # investigate() below. The tool roster it's actually given is a subset of even this.
     "investigate": frozenset({Scope.TXN_READ, Scope.DOCS_READ, Scope.POLICY_SEARCH}),
     "retrieve_policy": frozenset({Scope.POLICY_SEARCH}),
+    # M4c: only reads evidence already in state, same as decide/verify — no tool access.
+    "classify_injection": frozenset(),
     "decide": frozenset(),
     "verify": frozenset(),
     "review_gate": frozenset(),
@@ -277,9 +285,11 @@ def node(name: str):
 
 class Nodes:
     def __init__(self, settings: Settings, toolbox: Toolbox, reasoner: Reasoner,
-                 vision_reasoner: VisionReasoner | None = None, investigator_model=None):
+                 vision_reasoner: VisionReasoner | None = None, investigator_model=None,
+                 injection_classifier: InjectionClassifier | None = None):
         self.settings, self.tools, self.reasoner = settings, toolbox, reasoner
         self.vision_reasoner = vision_reasoner or make_vision_reasoner(settings)
+        self.injection_classifier = injection_classifier or make_injection_classifier(settings)
         # Only built when actually needed (settings.investigator == "react") — "fixed" mode
         # (the default) never constructs a chat model here, so it never needs an API key.
         self.investigator_model = investigator_model
@@ -377,7 +387,7 @@ class Nodes:
             result, meta = self.vision_reasoner.read(img["image_b64"], img["media_type"], img["kind"])
             usage.append(meta)
             hits = scan(result.transcribed_text)
-            if hits:
+            if is_suspicious(result.transcribed_text):
                 flags.append({"source": f"receipt:{rid}", "patterns": hits})
             ev.append(Evidence(
                 evidence_id=f"receipt:{rid}", kind="receipt", source_id=rid,
@@ -448,9 +458,29 @@ class Nodes:
             ev.append(_delivery_fact(d, delivery))
 
         flags = [{"source": f"receipt:{e.source_id}", "patterns": e.metadata["injection_patterns"]}
-                 for e in ev if e.kind == "receipt" and e.metadata["injection_patterns"]]
+                 for e in ev if e.kind == "receipt" and is_suspicious(e.text)]
         return {"evidence": ev, "injection_flags": flags,
                 "_summary": {"tool_calls_by_model": len(ctx.calls), "evidence_gathered": len(ev)}}
+
+    @node("classify_injection")
+    def classify_injection(self, state, ctx):
+        """M4c: unconditional second opinion on every untrusted evidence item, regardless of
+        whether guardrails.scan()'s regex already flagged something — a real second opinion has
+        to be able to catch what the first one missed, not just confirm it. Runs after all
+        evidence-gathering (fixed or react) so it sees the full untrusted-text surface — narrative
+        plus every receipt — in one pass. No tool scopes: it only reads evidence already in state,
+        same as decide/verify."""
+        flags, usage = [], []
+        for e in state.get("evidence", []):
+            if e.trusted or not e.text.strip():
+                continue
+            result, meta = self.injection_classifier.classify(e.text)
+            usage.append(meta)
+            if result.is_injection:
+                flags.append({"source": "classifier",
+                              "patterns": [f"{e.evidence_id}: {result.reasoning}"]})
+        return {"injection_flags": flags, "llm_usage": usage,
+                "_summary": {"reviewed": len(usage), "flagged": len(flags)}}
 
     @node("retrieve_policy")
     def retrieve_policy(self, state, ctx):
@@ -484,7 +514,10 @@ class Nodes:
         except Exception as e:  # model/parse failure is recoverable via retry or review
             return {"recommendation": None, "attempts": attempts,
                     "feedback": [f"Reasoner error: {e}"], "_summary": {"error": str(e)}}
-        return {"recommendation": rec, "attempts": attempts, "llm_usage": [usage],
+        # A routed decision (M4d RoutingReasoner) can make up to two LLM calls and reports both
+        # distinctly, rather than collapsing them into one misleading combined number.
+        usage_list = usage if isinstance(usage, list) else [usage]
+        return {"recommendation": rec, "attempts": attempts, "llm_usage": usage_list,
                 "_summary": {"outcome": rec.outcome.value, "section": rec.policy_section,
                              "confidence": rec.confidence}}
 
